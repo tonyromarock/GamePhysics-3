@@ -8,6 +8,9 @@
     <ClCompile Include="util\FFmpeg.cpp">
       <Filter>util</Filter>
     </ClCompile>
+    <ClCompile Include="massspringsystem.cpp" />
+    <ClCompile Include="rigidBody.cpp" />
+    <ClCompile Include="rigidBodySystem.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="util">
@@ -21,6 +24,9 @@
     <ClInclude Include="util\FFmpeg.h">
       <Filter>util</Filter>
     </ClInclude>
+    <ClInclude Include="massspringsystem.h" />
+    <ClInclude Include="rigidBody.hpp" />
+    <ClInclude Include="rigidBodySystem.hpp" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="effect.fx" />

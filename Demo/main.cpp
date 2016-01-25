@@ -14,7 +14,6 @@
 //DirectX includes
 #include <DirectXMath.h>
 using namespace DirectX;
-using std::cout;
 
 // Effect framework includes
 #include <d3dx11effect.h>
@@ -37,8 +36,20 @@ using std::cout;
 #include "util/util.h"
 #include "util/FFmpeg.h"
 
-#define TEMPLATE_DEMO
+//#define TEMPLATE_DEMO
 //#define MASS_SPRING_SYSTEM
+//#define RIGID_BODY_SYSTEM
+#define FLUID_SIMULATION
+
+#ifdef MASS_SPRING_SYSTEM
+#include "massspringsystem.h"
+#endif
+#ifdef RIGID_BODY_SYSTEM
+#include "rigidBodySystem.hpp"
+#endif
+#ifdef FLUID_SIMULATION
+#include "fluidSimulationSystem.hpp"
+#endif
 
 // DXUT camera
 // NOTE: CModelViewerCamera does not only manage the standard view transformation/camera position 
@@ -53,7 +64,7 @@ ID3D11Device* g_pPd3Device = nullptr;
 // Main tweak bar
 TwBar* g_pTweakBar;
 
-// DirectXTK effects, input layouts and primitive batches for different vertex types
+// DirectXTK effect, input layout and primitive batch for position/color vertices
 // (for drawing multicolored & unlit primitives)
 BasicEffect*                          g_pEffectPositionColor          = nullptr;
 ID3D11InputLayout*                    g_pInputLayoutPositionColor     = nullptr;
@@ -78,6 +89,18 @@ XMINT2   g_viMouseDelta = XMINT2(0,0);
 XMFLOAT3 g_vfMovableObjectPos = XMFLOAT3(0,0,0);
 XMFLOAT3 g_vfRotate = XMFLOAT3(0, 0, 0);
 
+#ifdef MASS_SPRING_SYSTEM
+std::unique_ptr<MassSpringSystem> g_pMassSpringSystem;
+#endif
+#ifdef RIGID_BODY_SYSTEM
+std::unique_ptr<RigidBodySystem>  g_pRigidBosySystem;
+#endif
+#ifdef FLUID_SIMULATION
+std::unique_ptr<FluidSimulationSystem> g_pFluidSimulationSystem;
+#endif
+
+DirectX::XMVECTOR g_globalFrameForce;
+
 // TweakAntBar GUI variables
 
 int g_iTestCase = 1;
@@ -89,10 +112,48 @@ int   g_iNumSpheres    = 100;
 float g_fSphereSize    = 0.05f;
 bool  g_bDrawTeapot    = true;
 bool  g_bDrawTriangle  = true;
-bool  g_bDrawSpheres = true;
+bool  g_bDrawSpheres   = false;
 #endif
-//#ifdef MASS_SPRING_SYSTEM
-//#endif
+#ifdef MASS_SPRING_SYSTEM
+bool  g_bDrawMassSpringSystem = true;
+float g_fMass      = 0.01f;
+float g_fStiffness = 25.0f;
+float g_fDamping   = 0.01f;
+int g_iIntegrator = 1;
+int g_iCube = 1;
+#endif
+#ifdef RIGID_BODY_SYSTEM
+bool  g_bDrawSpheres  = true;
+float g_fMass         = 0.01f;
+float g_fRadius       = 0.03f;
+float g_fForceScaling = 1.0f;
+float g_fDamping = 0.01f;
+int   g_iNumSpheres = 250;
+int   g_iAccelerator = 0;
+int   g_iKernel = 4;
+XMINT2 g_cursor;
+std::function<float(float)> g_Kernels[] = {
+	[](float x){return 1.0f; },              // Constant
+	[](float x){return 1.0f - x; },          // Linear
+	[](float x){return (1.0f - x)*(1.0f - x); }, // Quadratic
+	[](float x){return 1.0f / (x)-1.0f; },     // Weak Electric Charge
+	[](float x){return 1.0f / (x*x) - 1.0f; },   // Electric Charge
+};
+#endif
+#ifdef FLUID_SIMULATION
+bool g_bDrawFluidParticles = true;
+float g_fMass = 0.01f;
+float g_fKernelSize = 0.03f;
+float g_fStiffnessFactor = 1.0f;
+float g_fVelocityDamping = 0.04f;
+float g_fExponent = 7.0f;
+int   g_iRestDensity = 200;
+#endif
+
+#if defined(MASS_SPRING_SYSTEM) || defined(RIGID_BODY_SYSTEM) || defined(FLUID_SIMULATION)
+float g_fTimestep = 0.001f;
+float g_fTimeFactor = 1.0f;
+#endif
 
 // Video recorder
 FFmpeg* g_pFFmpegVideoRecorder = nullptr;
@@ -100,10 +161,12 @@ FFmpeg* g_pFFmpegVideoRecorder = nullptr;
 // Create TweakBar and add required buttons and variables
 void InitTweakBar(ID3D11Device* pd3dDevice)
 {
+    //TwInit(TW_DIRECT3D11, pd3dDevice);
+
     g_pTweakBar = TwNewBar("TweakBar");
 	TwDefine(" TweakBar color='0 128 128' alpha=128 ");
 
-	TwType TW_TYPE_TESTCASE = TwDefineEnumFromString("Test Scene", "BasicTest,Setup1,Setup2,Setup3");
+	TwType TW_TYPE_TESTCASE = TwDefineEnumFromString("Test Scene", "BasicTest,Setup1,Setup2");
 	TwAddVarRW(g_pTweakBar, "Test Scene", TW_TYPE_TESTCASE, &g_iTestCase, "");
 	// HINT: For buttons you can directly pass the callback function as a lambda expression.
 	TwAddButton(g_pTweakBar, "Reset Scene", [](void *){g_iPreTestCase = -1; }, nullptr, "");
@@ -129,9 +192,79 @@ void InitTweakBar(ID3D11Device* pd3dDevice)
 		break;
 	}
 #endif
+    
+#ifdef MASS_SPRING_SYSTEM
+	TwAddVarRW(g_pTweakBar, "Draw MSS",  TW_TYPE_BOOLCPP, &g_bDrawMassSpringSystem, "");
+	
+	
+	switch (g_iTestCase)
+	{
+	case 0:
+		break;
+	case 1:
+		{
+			TwType TW_TYPE_INTEGRATOR = TwDefineEnumFromString("Integrator", "Euler,LeapFrog,Midpoint");
+			TwAddVarRW(g_pTweakBar, "Integrator", TW_TYPE_INTEGRATOR, &g_iIntegrator, "");
+		}
+		break;
+	case 2:
+		{
+			TwType TW_TYPE_INTEGRATOR = TwDefineEnumFromString("Integrator", "Euler,LeapFrog,Midpoint");
+			TwAddVarRW(g_pTweakBar, "Integrator", TW_TYPE_INTEGRATOR, &g_iIntegrator, "");
+			TwAddVarRW(g_pTweakBar, "Mass",        TW_TYPE_FLOAT, &g_fMass,       "step=0.001  min=0.001");
+    		TwAddVarRW(g_pTweakBar, "Stiffness",   TW_TYPE_FLOAT, &g_fStiffness,  "step=0.001  min=0.001");
+    		TwAddVarRW(g_pTweakBar, "Damping",     TW_TYPE_FLOAT, &g_fDamping,    "step=0.001  min=0");
+			TwAddVarRW(g_pTweakBar, "Cube", TW_TYPE_INT32, &g_iCube, "min = 1");
+			TwAddVarRW(g_pTweakBar, "Timestep", TW_TYPE_FLOAT, &g_fTimestep, "step=0.0001 min=0.0001");
+			TwAddVarRW(g_pTweakBar, "Time Factor", TW_TYPE_FLOAT, &g_fTimeFactor, "step=0.01   min=0.01");
+		}
+		break;
+	default:
+		break;
+	}
 
-//#ifdef MASS_SPRING_SYSTEM
-//#endif
+#endif
+
+#ifdef RIGID_BODY_SYSTEM
+	TwAddVarRW(g_pTweakBar, "Draw", TW_TYPE_BOOLCPP, &g_bDrawSpheres, "");
+	
+	switch (g_iTestCase)
+	{
+	case 0:
+		break;
+	case 1:
+	case 2:
+	{
+		TwAddVarRW(g_pTweakBar, "Timestep", TW_TYPE_FLOAT, &g_fTimestep, "step=0.0001 min=0.0001");
+		TwAddVarRW(g_pTweakBar, "Time Factor", TW_TYPE_FLOAT, &g_fTimeFactor, "step=0.01   min=0.01");
+	}
+	default:
+		break;
+	}
+#endif
+
+#ifdef FLUID_SIMULATION
+	TwAddVarRW(g_pTweakBar, "Draw", TW_TYPE_BOOLCPP, &g_bDrawFluidParticles, "");
+
+	switch (g_iTestCase)
+	{
+	case 0:
+		break;
+	case 1:
+	case 2:
+	{
+		TwAddVarRW(g_pTweakBar, "Timestep", TW_TYPE_FLOAT, &g_fTimestep, "step=0.0001 min=0.0001");
+		TwAddVarRW(g_pTweakBar, "Time Factor", TW_TYPE_FLOAT, &g_fTimeFactor, "step=0.01   min=0.01");
+
+		TwAddVarRW(g_pTweakBar, "Velocity Damping", TW_TYPE_FLOAT, &g_fVelocityDamping, "step=0.01 min=0.01");
+		TwAddVarRW(g_pTweakBar, "Exponent", TW_TYPE_FLOAT, &g_fExponent, "step=0.1   min=1.0");
+		TwAddVarRW(g_pTweakBar, "Stiffness Factor", TW_TYPE_FLOAT, &g_fStiffnessFactor, "step=0.01   min=0.01");
+		TwAddVarRW(g_pTweakBar, "Rest Density", TW_TYPE_INT32, &g_iRestDensity, "step=1   min=100");
+	}
+	default:
+		break;
+	}
+#endif
 }
 
 // Draw the edges of the bounding box [-0.5;0.5]³ rotated with the cameras model tranformation.
@@ -152,7 +285,7 @@ void DrawBoundingBox(ID3D11DeviceContext* pd3dImmediateContext)
     {
         g_pPrimitiveBatchPositionColor->DrawLine(
             VertexPositionColor(XMVectorSet(-0.5f, (float)(i%2)-0.5f, (float)(i/2)-0.5f, 1), Colors::Red),
-            VertexPositionColor(XMVectorSet( 0.5f, (float)(i%2)-0.5f, (float)(i/2)-0.5f, 1), Colors::Red)
+            VertexPositionColor(XMVectorSet( 0.6f, (float)(i%2)-0.5f, (float)(i/2)-0.5f, 1), Colors::Red)
         );
     }
 
@@ -161,7 +294,7 @@ void DrawBoundingBox(ID3D11DeviceContext* pd3dImmediateContext)
     {
         g_pPrimitiveBatchPositionColor->DrawLine(
             VertexPositionColor(XMVectorSet((float)(i%2)-0.5f, -0.5f, (float)(i/2)-0.5f, 1), Colors::Green),
-            VertexPositionColor(XMVectorSet((float)(i%2)-0.5f,  0.5f, (float)(i/2)-0.5f, 1), Colors::Green)
+            VertexPositionColor(XMVectorSet((float)(i%2)-0.5f,  0.6f, (float)(i/2)-0.5f, 1), Colors::Green)
         );
     }
 
@@ -170,7 +303,7 @@ void DrawBoundingBox(ID3D11DeviceContext* pd3dImmediateContext)
     {
         g_pPrimitiveBatchPositionColor->DrawLine(
             VertexPositionColor(XMVectorSet((float)(i%2)-0.5f, (float)(i/2)-0.5f, -0.5f, 1), Colors::Blue),
-            VertexPositionColor(XMVectorSet((float)(i%2)-0.5f, (float)(i/2)-0.5f,  0.5f, 1), Colors::Blue)
+            VertexPositionColor(XMVectorSet((float)(i%2)-0.5f, (float)(i/2)-0.5f,  0.6f, 1), Colors::Blue)
         );
     }
 
@@ -292,9 +425,92 @@ void DrawTriangle(ID3D11DeviceContext* pd3dImmediateContext)
 }
 #endif
 
-//#ifdef MASS_SPRING_SYSTEM
-//void DrawMassSpringSystem(ID3D11DeviceContext* pd3dImmediateContext)
-//#endif
+#ifdef MASS_SPRING_SYSTEM
+void DrawMassSpringSystem(ID3D11DeviceContext* pd3dImmediateContext)
+{
+	// Setup position/normal effect (constant variables)
+	g_pEffectPositionNormal->SetEmissiveColor(Colors::Black);
+	g_pEffectPositionNormal->SetSpecularColor(0.4f * Colors::White);
+	g_pEffectPositionNormal->SetSpecularPower(100);
+	g_pEffectPositionNormal->SetDiffuseColor(0.6f * Colors::IndianRed);
+
+	auto& points = g_pMassSpringSystem->GetPoints();
+	float pointSize = 0.01f;
+
+	for (size_t i = 0; i<points.size(); i++)
+	{
+		// Setup position/normal effect (per object variables)
+		XMMATRIX scale = XMMatrixScaling(pointSize, pointSize, pointSize);
+		XMMATRIX trans = XMMatrixTranslation(points[i].pos.x, points[i].pos.y, points[i].pos.z);
+		g_pEffectPositionNormal->SetWorld(scale * trans * g_camera.GetWorldMatrix());
+
+		// Draw
+		// NOTE: The following generates one draw call per object, so performance will be bad for n>>1000 or so
+		g_pSphere->Draw(g_pEffectPositionNormal, g_pInputLayoutPositionNormal);
+	}
+
+	// Setup position/color effect
+	g_pEffectPositionColor->SetWorld(g_camera.GetWorldMatrix());
+
+	g_pEffectPositionColor->Apply(pd3dImmediateContext);
+	pd3dImmediateContext->IASetInputLayout(g_pInputLayoutPositionColor);
+
+	// Draw
+	g_pPrimitiveBatchPositionColor->Begin();
+
+	auto& springs = g_pMassSpringSystem->GetSprings();
+
+	for (size_t i = 0; i<springs.size(); i++)
+	{
+		XMVECTOR pos1 = XMLoadFloat3(&points[springs[i].point1].pos);
+		XMVECTOR pos2 = XMLoadFloat3(&points[springs[i].point2].pos);
+
+		g_pPrimitiveBatchPositionColor->DrawLine(
+			VertexPositionColor(pos1, Colors::DarkGreen),
+			VertexPositionColor(pos2, Colors::DarkGreen)
+			);
+	}
+
+	g_pPrimitiveBatchPositionColor->End();
+
+}
+#endif
+
+#ifdef FLUID_SIMULATION
+void DrawFluidSimulationSystem(ID3D11DeviceContext* pd3dImmediateContext)
+{
+	// Setup position/normal effect (constant variables)
+	g_pEffectPositionNormal->SetEmissiveColor(Colors::Black);
+	g_pEffectPositionNormal->SetSpecularColor(0.4f * Colors::White);
+	g_pEffectPositionNormal->SetSpecularPower(100);
+	g_pEffectPositionNormal->SetDiffuseColor(0.6f * Colors::IndianRed);
+
+	auto& particles = g_pFluidSimulationSystem->GetParticles();
+	float pointSize = 0.01f;
+
+	for (size_t i = 0; i<particles.size(); i++)
+	{
+		// Setup position/normal effect (per object variables)
+		XMMATRIX scale = XMMatrixScaling(pointSize, pointSize, pointSize);
+		XMMATRIX trans = XMMatrixTranslation(particles[i].pos.x, particles[i].pos.y, particles[i].pos.z);
+		g_pEffectPositionNormal->SetWorld(scale * trans * g_camera.GetWorldMatrix());
+
+		// Draw
+		// NOTE: The following generates one draw call per object, so performance will be bad for n>>1000 or so
+		g_pSphere->Draw(g_pEffectPositionNormal, g_pInputLayoutPositionNormal);
+	}
+
+	// Setup position/color effect
+	g_pEffectPositionColor->SetWorld(g_camera.GetWorldMatrix());
+
+	g_pEffectPositionColor->Apply(pd3dImmediateContext);
+	pd3dImmediateContext->IASetInputLayout(g_pInputLayoutPositionColor);
+
+}
+#endif
+
+
+
 // ============================================================
 // DXUT Callbacks
 // ============================================================
@@ -523,7 +739,11 @@ void CALLBACK OnMouse( bool bLeftButtonDown, bool bRightButtonDown, bool bMiddle
 {
 	switch (g_iTestCase)
 	{
+#if defined(MASS_SPRING_SYSTEM) || defined(RIGID_BODY_SYSTEM) || defined (FLUID_SIMULATION)
+	case 2:
+#else
 	case 1:
+#endif
 		// Track mouse movement if left mouse key is pressed
 		{
 			static int xPosSave = 0, yPosSave = 0;
@@ -537,6 +757,10 @@ void CALLBACK OnMouse( bool bLeftButtonDown, bool bRightButtonDown, bool bMiddle
 
 			xPosSave = xPos;
 			yPosSave = yPos;
+#ifdef RIGID_BODY_SYSTEM
+			g_cursor.x = xPos;
+			g_cursor.y = yPos;
+#endif
 		}
 		break;
 	default:
@@ -573,19 +797,19 @@ LRESULT CALLBACK MsgProc( HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
 //--------------------------------------------------------------------------------------
 // Handle updates to the scene
 //--------------------------------------------------------------------------------------
-void CALLBACK OnFrameMove(double dTime, float fElapsedTime, void* pUserContext)
+void CALLBACK OnFrameMove( double dTime, float fElapsedTime, void* pUserContext )
 {
 	UpdateWindowTitle(L"Demo");
 
-	// Move camera
-	g_camera.FrameMove(fElapsedTime);
+    // Move camera
+    g_camera.FrameMove(fElapsedTime);
 
-	// Update effects with new view + proj transformations
-	g_pEffectPositionColor->SetView(g_camera.GetViewMatrix());
-	g_pEffectPositionColor->SetProjection(g_camera.GetProjMatrix());
+    // Update effects with new view + proj transformations
+    g_pEffectPositionColor->SetView       (g_camera.GetViewMatrix());
+    g_pEffectPositionColor->SetProjection (g_camera.GetProjMatrix());
 
-	g_pEffectPositionNormal->SetView(g_camera.GetViewMatrix());
-	g_pEffectPositionNormal->SetProjection(g_camera.GetProjMatrix());
+    g_pEffectPositionNormal->SetView      (g_camera.GetViewMatrix());
+    g_pEffectPositionNormal->SetProjection(g_camera.GetProjMatrix());
 
 	g_pEffectPositionNormalColor->SetView(g_camera.GetViewMatrix());
 	g_pEffectPositionNormalColor->SetProjection(g_camera.GetProjMatrix());
@@ -655,11 +879,11 @@ void CALLBACK OnFrameMove(double dTime, float fElapsedTime, void* pUserContext)
 		}
 		// rotate the teapot
 		g_vfRotate.x += 0.005f;
-		if (g_vfRotate.x > 2 * M_PI) g_vfRotate.x -= 2 * M_PI;
+		if (g_vfRotate.x > 2 * M_PI) g_vfRotate.x -= 2.0f * (float)M_PI;
 		g_vfRotate.y += 0.005f;
-		if (g_vfRotate.y > 2 * M_PI) g_vfRotate.y -= 2 * M_PI;
+		if (g_vfRotate.y > 2 * M_PI) g_vfRotate.y -= 2.0f * (float)M_PI;
 		g_vfRotate.z += 0.005f;
-		if (g_vfRotate.z > 2 * M_PI) g_vfRotate.z -= 2 * M_PI;
+		if (g_vfRotate.z > 2 * M_PI) g_vfRotate.z -= 2.0f * (float)M_PI;
 
 		break;
 	default:
@@ -667,10 +891,259 @@ void CALLBACK OnFrameMove(double dTime, float fElapsedTime, void* pUserContext)
 	}
 	if (g_bSimulateByStep)
 		g_bIsSpaceReleased = true;
-	
 #endif
-//#ifdef MASS_SPRING_SYSTEM
-//#endif
+
+#if defined(MASS_SPRING_SYSTEM) || defined(RIGID_BODY_SYSTEM) || defined (FLUID_SIMULATION)
+	static XMVECTOR pullforce = XMVectorZero();
+		
+	if (g_viMouseDelta.x != 0 || g_viMouseDelta.y != 0)
+    {
+		XMMATRIX worldViewInv = XMMatrixInverse(nullptr, g_camera.GetWorldMatrix() * g_camera.GetViewMatrix());
+		XMVECTOR forceView    = XMVectorSet((float)g_viMouseDelta.x, (float)-g_viMouseDelta.y, 0, 0);
+		XMVECTOR forceWorld   = XMVector3TransformNormal(forceView, worldViewInv);
+		float forceScale = 0.2f;
+
+		pullforce += forceScale * forceWorld;
+		g_viMouseDelta = XMINT2(0,0);
+	}
+	pullforce -= 5.0f * fElapsedTime * pullforce;
+
+	XMMATRIX worldInv = XMMatrixInverse(nullptr, g_camera.GetWorldMatrix());
+	XMVECTOR gravity  = XMVector3TransformNormal(XMVectorSet(0, -9.81f, 0, 0), worldInv);
+#endif
+    
+#ifdef MASS_SPRING_SYSTEM
+
+	if (g_iPreTestCase != g_iTestCase){
+		TwDeleteBar(g_pTweakBar);
+		g_pTweakBar = nullptr;
+		InitTweakBar(g_pPd3Device);
+		g_pMassSpringSystem->SetCube(g_iCube);
+		g_pMassSpringSystem->SceneSetup(g_iTestCase);
+		g_iPreTestCase = g_iTestCase;
+	}
+	if (g_bSimulateByStep && DXUTIsKeyDown(VK_SPACE)){
+		g_bIsSpaceReleased = false;
+	}
+	if (g_bSimulateByStep && !g_bIsSpaceReleased)
+		if (DXUTIsKeyDown(VK_SPACE))
+			return;
+	if (g_bSimulateByStep && g_bIsSpaceReleased)
+		return;
+
+	static float timeAcc = 0;
+	switch (g_iTestCase)
+	{
+	case 1:
+		{
+			timeAcc += fElapsedTime * g_fTimeFactor;
+			int maxIter = 10;
+			while (timeAcc > g_fTimestep)
+			{
+				if (maxIter > 0)
+				{
+					switch (g_iIntegrator)
+					{
+					case 0: g_pMassSpringSystem->AdvanceEuler(0.005f); break;
+					case 1: g_pMassSpringSystem->AdvanceLeapFrog(0.005f); break;
+					case 2: g_pMassSpringSystem->AdvanceMidPoint(0.005f); break;
+					}
+					maxIter--;
+				}
+				timeAcc -= g_fTimestep;
+				if (g_bSimulateByStep){
+					g_bIsSpaceReleased = true;
+					break;
+				}
+			}
+			//if (maxIter == 0) std::wcout << L"Slowing down" << std::endl;
+		}
+		break;
+	case 2:
+		{
+			//XMFLOAT3 curpullforce;
+			//XMStoreFloat3(&curpullforce, pullforce);
+			//std::cout << "pullforce, x, " << curpullforce.x << ", y, " << curpullforce.y << ", z, " << curpullforce.z << "\n";
+
+			g_pMassSpringSystem->SetGravity(gravity + pullforce);
+			g_pMassSpringSystem->SetMass(g_fMass);
+			g_pMassSpringSystem->SetStiffness(g_fStiffness);
+			g_pMassSpringSystem->SetDamping(g_fDamping);
+	
+			timeAcc += fElapsedTime * g_fTimeFactor;
+			int maxIter = 10;
+			while (timeAcc > g_fTimestep)
+			{
+				if (maxIter > 0)
+				{
+					switch (g_iIntegrator)
+					{
+						case 0: g_pMassSpringSystem->AdvanceEuler(g_fTimestep); g_pMassSpringSystem->BoundingBoxCheck(); break;
+						case 1: g_pMassSpringSystem->AdvanceLeapFrog(g_fTimestep); g_pMassSpringSystem->BoundingBoxCheck(); break;
+						case 2: g_pMassSpringSystem->AdvanceMidPoint(g_fTimestep); g_pMassSpringSystem->BoundingBoxCheck(); break;
+					}
+					maxIter--;
+				}
+				timeAcc -= g_fTimestep;
+				if (g_bSimulateByStep){
+					g_bIsSpaceReleased = true;
+					break;
+				}
+			}
+			//if (maxIter == 0) std::wcout << L"Slowing down" << std::endl;
+		}
+		break;
+	default:
+		break;
+	}
+#endif
+
+#ifdef RIGID_BODY_SYSTEM
+	
+	// test case changed
+	if (g_iPreTestCase != g_iTestCase){
+		TwDeleteBar(g_pTweakBar);
+		g_pTweakBar = nullptr;
+		InitTweakBar(g_pPd3Device);
+		
+		// todo setup different case
+		g_pRigidBosySystem->SceneSetup(g_iTestCase);
+		g_iPreTestCase = g_iTestCase;
+	}
+
+	// key & mouse handling
+	if (g_bSimulateByStep && DXUTIsKeyDown(VK_SPACE)){
+		g_bIsSpaceReleased = false;
+	}
+	if (g_bSimulateByStep && !g_bIsSpaceReleased)
+		if (DXUTIsKeyDown(VK_SPACE))
+			return;
+	if (g_bSimulateByStep && g_bIsSpaceReleased)
+		return;
+	
+	// one fixed time step
+	switch (g_iTestCase)
+	{// case 0 do nothing
+	case 1:
+	{
+		static const size_t maxLoops = 512;
+		static float timeAcc = 0;
+		timeAcc += fElapsedTime * g_fTimeFactor;
+		size_t loops = 0;
+		while (timeAcc > g_fTimestep)
+		{
+			if (loops >= maxLoops)
+			{
+				std::cout << "Warning: skipping physics frames!\n";
+				timeAcc = 0.0f;
+				//break;
+			}
+
+			g_pRigidBosySystem->addGlobalFrameForce(pullforce);
+			g_pRigidBosySystem->update(g_fTimestep);
+			timeAcc -= g_fTimestep;
+			if (g_bSimulateByStep){
+				g_bIsSpaceReleased = true;
+				break;
+			}
+			++loops;
+		}
+		break;
+	}
+		
+	case 2:
+	{
+		if (DXUTIsKeyDown(VK_LBUTTON))
+			g_pRigidBosySystem->dragTogether();
+		static const size_t maxLoops = 512;
+		static float timeAcc = 0;
+		timeAcc += fElapsedTime * g_fTimeFactor;
+		size_t loops = 0;
+		while (timeAcc > g_fTimestep)
+		{
+			if (loops >= maxLoops)
+			{
+				std::cout << "Warning: skipping physics frames!\n";
+				timeAcc = 0.0f;
+				//break;
+			}
+			
+			g_pRigidBosySystem->addGlobalFrameForce(pullforce);
+			g_pRigidBosySystem->update(g_fTimestep);
+			timeAcc -= g_fTimestep;
+			if (g_bSimulateByStep){
+				g_bIsSpaceReleased = true;
+				break;
+			}
+			++loops;
+		}
+		break;
+	}		
+	default:
+		break;
+	}
+#endif
+
+#ifdef FLUID_SIMULATION
+
+	if (g_iPreTestCase != g_iTestCase) {
+		TwDeleteBar(g_pTweakBar);
+		g_pTweakBar = nullptr;
+		InitTweakBar(g_pPd3Device);
+		g_pFluidSimulationSystem->SetMass(g_fMass);
+		g_pFluidSimulationSystem->SetKernelSize(g_fKernelSize);
+		g_pFluidSimulationSystem->SetStiffness(g_fStiffnessFactor);
+		g_pFluidSimulationSystem->SetExponent(g_fExponent);
+		g_pFluidSimulationSystem->SetRestDensity(g_iRestDensity);
+		g_pFluidSimulationSystem->SetVelocityDamping(g_fVelocityDamping);
+
+		// Change test case by putting in '1' -> Naive or '2' -> 'Uniform Grid' into this function.
+		// g_pFluidSimulationSystem->SetTestCase(1);
+		g_pFluidSimulationSystem->SetTestCase(2);
+		g_pFluidSimulationSystem->setupScene(100);
+
+		g_iPreTestCase = g_iTestCase;
+	}
+	if (g_bSimulateByStep && DXUTIsKeyDown(VK_SPACE)) {
+		g_bIsSpaceReleased = false;
+	}
+	if (g_bSimulateByStep && !g_bIsSpaceReleased)
+		if (DXUTIsKeyDown(VK_SPACE))
+			return;
+	if (g_bSimulateByStep && g_bIsSpaceReleased)
+		return;
+
+	static float timeAcc = 0;
+	switch (g_iTestCase)
+	{
+	case 1:
+	{
+			timeAcc += fElapsedTime * g_fTimeFactor;
+			int maxIter = 10;
+			while (timeAcc > g_fTimestep)
+			{
+				if (maxIter > 0)
+				{
+					g_pFluidSimulationSystem->DoEulerStep(g_fTimestep);
+					g_pFluidSimulationSystem->BoundingBoxCheck();
+					maxIter--;
+				}
+				timeAcc -= g_fTimestep;
+				if (g_bSimulateByStep) {
+					g_bIsSpaceReleased = true;
+					break;
+				}
+			}
+	}
+	break;
+	case 2:
+	{
+	}
+	break;
+	default:
+		break;
+	}
+#endif
 }
 
 //--------------------------------------------------------------------------------------
@@ -715,8 +1188,18 @@ void CALLBACK OnD3D11FrameRender( ID3D11Device* pd3dDevice, ID3D11DeviceContext*
 	}
 #endif
     
-//#ifdef MASS_SPRING_SYSTEM
-//#endif
+#ifdef MASS_SPRING_SYSTEM
+	// Draw mass spring system
+	if (g_bDrawMassSpringSystem) DrawMassSpringSystem(pd3dImmediateContext);
+#endif
+
+#ifdef RIGID_BODY_SYSTEM
+	if (g_bDrawSpheres) g_pRigidBosySystem->draw(pd3dImmediateContext);
+#endif
+
+#ifdef FLUID_SIMULATION
+	if (g_bDrawFluidParticles) DrawFluidSimulationSystem(pd3dImmediateContext);
+#endif
 
     // Draw GUI
     TwDraw();
@@ -764,6 +1247,16 @@ int main(int argc, char* argv[])
 	g_camera.SetViewParams(XMLoadFloat3(&eye), XMLoadFloat3(&lookAt));
     g_camera.SetButtonMasks(MOUSE_MIDDLE_BUTTON, MOUSE_WHEEL, MOUSE_RIGHT_BUTTON);
 
+#ifdef MASS_SPRING_SYSTEM
+	g_pMassSpringSystem = std::unique_ptr<MassSpringSystem>(new MassSpringSystem());
+#endif
+#ifdef RIGID_BODY_SYSTEM
+	g_pRigidBosySystem = std::unique_ptr<RigidBodySystem>(new RigidBodySystem());
+#endif
+#ifdef FLUID_SIMULATION
+	g_pFluidSimulationSystem = std::unique_ptr<FluidSimulationSystem>(new FluidSimulationSystem());
+#endif
+
     // Init DXUT and create device
 	DXUTInit( true, true, NULL ); // Parse the command line, show msgboxes on error, no extra command line params
 	//DXUTSetIsInGammaCorrectMode( false ); // true by default (SRGB backbuffer), disable to force a RGB backbuffer
@@ -772,6 +1265,16 @@ int main(int argc, char* argv[])
 	DXUTCreateDevice( D3D_FEATURE_LEVEL_11_0, true, 1280, 960 );
     
 	DXUTMainLoop(); // Enter into the DXUT render loop
+
+#ifdef MASS_SPRING_SYSTEM
+	g_pMassSpringSystem.reset();
+#endif
+#ifdef RIGID_BODY_SYSTEM
+	g_pRigidBosySystem.reset();
+#endif
+#ifdef FLUID_SIMULATION
+	g_pFluidSimulationSystem.reset();
+#endif
 
 	DXUTShutdown(); // Shuts down DXUT (includes calls to OnD3D11ReleasingSwapChain() and OnD3D11DestroyDevice())
 	

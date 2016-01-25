@@ -209,10 +209,16 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="massspringsystem.cpp" />
+    <ClCompile Include="rigidBody.cpp" />
+    <ClCompile Include="rigidBodySystem.cpp" />
     <ClCompile Include="util\FFmpeg.cpp" />
     <ClCompile Include="util\util.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="massspringsystem.h" />
+    <ClInclude Include="rigidBody.hpp" />
+    <ClInclude Include="rigidBodySystem.hpp" />
     <ClInclude Include="util\FFmpeg.h" />
     <ClInclude Include="util\util.h" />
   </ItemGroup>
